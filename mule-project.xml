@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<mule-project xmlns="http://www.mulesoft.com/tooling/project">
+    <muleExtension name="HL7" qualifier="org.mule.tooling.ui.contribution.hl7"/>
+    <muleExtension name="Salesforce" qualifier="org.mule.tooling.ui.contribution.sfdc"/>
+</mule-project>

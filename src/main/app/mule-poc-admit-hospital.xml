@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule 
+    xmlns:scripting="http://www.mulesoft.org/schema/mule/scripting" 
+    xmlns:tcp="http://www.mulesoft.org/schema/mule/tcp" 
+    xmlns:smtp="http://www.mulesoft.org/schema/mule/smtp"
+	xmlns:data-mapper="http://www.mulesoft.org/schema/mule/ee/data-mapper" 
+    xmlns:sfdc="http://www.mulesoft.org/schema/mule/sfdc" 
+    xmlns:hl7="http://www.mulesoft.org/schema/mule/hl7" 
+    xmlns:file="http://www.mulesoft.org/schema/mule/file" 
+    xmlns="http://www.mulesoft.org/schema/mule/core" 
+    xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" 
+    xmlns:spring="http://www.springframework.org/schema/beans" 
+    version="EE-3.4.0" 
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+    xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/hl7 http://www.mulesoft.org/schema/mule/hl7/current/mule-hl7.xsd
+        http://www.mulesoft.org/schema/mule/tcp http://www.mulesoft.org/schema/mule/tcp/current/mule-tcp.xsd
+        http://www.mulesoft.org/schema/mule/file http://www.mulesoft.org/schema/mule/file/current/mule-file.xsd
+        http://www.mulesoft.org/schema/mule/ee/data-mapper http://www.mulesoft.org/schema/mule/ee/data-mapper/current/mule-data-mapper.xsd
+        http://www.mulesoft.org/schema/mule/sfdc http://www.mulesoft.org/schema/mule/sfdc/5.0/mule-sfdc.xsd
+        http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans-current.xsd
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/scripting http://www.mulesoft.org/schema/mule/scripting/current/mule-scripting.xsd
+        http://www.mulesoft.org/schema/mule/smtp http://www.mulesoft.org/schema/mule/smtp/current/mule-smtp.xsd">
+
+    <sfdc:config name="UC_SF_Connection" username="healthcare.summit.demo@mulesoft.com" password="MuleR0cks" securityToken="dWGhDK45RCsHUdTcqAlDup7Q" 
+                 url="https://login.salesforce.com/services/Soap/u/26.0" doc:name="Salesforce">
+        <sfdc:connection-pooling-profile initialisationPolicy="INITIALISE_ONE" exhaustedAction="WHEN_EXHAUSTED_GROW"/>
+    </sfdc:config>
+
+    <data-mapper:config name="a01xml_masterpatient_grf" transformationGraphPath="a01xml-masterpatient.grf" doc:name="DataMapper"/>
+    <data-mapper:config name="a01xml2pv1_grf" transformationGraphPath="a01xml2pv1.grf" doc:name="DataMapper"/>
+
+    <hl7:connector name="HL7Connector" hl7Encoding="XML" />
+      
+    <flow name="mule-poc-mainFlow" doc:name="mule-poc-mainFlow">
+        <hl7:inbound-endpoint host="localhost" port="9001" exchange-pattern="request-response"/> 
+        <logger message="New HL7 message received: #[payload]" level="INFO" doc:name="Log XML Output NEW"/>
+        
+        <enricher target="#[flowVars['patientId']]" doc:name="Enrich Message with SFDC Patient Object Id">
+            <flow-ref name="mule-poc-insert-patient" doc:name="Insert Patient Flow"/>
+        </enricher>
+        
+        <logger message="PATIENT ID IS: #[flowVars['patientId']]" level="INFO" doc:name="Logger"/>
+        
+        <enricher target="#[flowVars['patientVisitId']]" doc:name="Enrich Message with PatientVisitId">
+            <flow-ref name="mule-poc-insert-patientVisit" doc:name="Insert Patient Visit Flow"/>
+        </enricher>
+        
+        <logger message="PATIENT VISIT ID IS: #[flowVars['patientVisitId']]" level="INFO" doc:name="Print before Response"/>
+        
+        <choice doc:name="Choice">
+            <when expression="#[flowVars['patientVisitId'] instanceof NullPayload]">
+                <logger message="Patient Visit ID is null, rolling back..." level="INFO" doc:name="Logger"/>
+
+                <enricher target="#[flowVars['rollbackStatus']]">
+                    <flow-ref name="rollBackPatient" doc:name="Roll Back Master on Visit Failure"/>            
+                </enricher>
+        
+                <hl7:ack-component ackCode="AE"/> 
+            </when>
+            <otherwise>
+                <hl7:ack-component ackCode="AA"/> 
+            </otherwise>
+        </choice>
+        
+        <hl7:exception-strategy>
+            <choice doc:name="Choice">
+                <when expression="#[flowVars['patientId'] != null]">
+                    <logger message="&quot;ERROR Handler Patient Id = &quot; + #[flowVars['patientId']]" level="INFO" doc:name="Logger"/>
+                    <flow-ref name="rollBackPatient" doc:name="Flow Reference"/>
+                </when>
+                <otherwise>
+                    <logger message="&quot;No Rollback Patient Does not Exist&quot;" level="INFO" doc:name="Logger"/>
+                </otherwise>
+            </choice>
+        </hl7:exception-strategy>
+
+    </flow>
+    
+    <sub-flow name="mule-poc-insert-patient" doc:name="mule-poc-insert-patient">
+
+        <logger message="MRN NUMBER IS: #[hl7('/PID-3-1')]" level="INFO" doc:name="Log MRN"/>
+        
+        <enricher target="#[flowVars['existingPid']]">
+            <sfdc:query config-ref="UC_SF_Connection" query="SELECT mp.Id FROM Master_Patient__c mp WHERE mp.MRN_Number__c='#[hl7('/PID-3-1')]'" doc:name="Lookup Patient"/>
+        </enricher>        
+        
+        <choice>
+            <when expression="#[flowVars['existingPid'].size() == 0]">
+                <data-mapper:transform config-ref="a01xml_masterpatient_grf" doc:name="Transform A01 to MasterPatient"/>
+        
+                <sfdc:create config-ref="UC_SF_Connection" type="Master_Patient__c" doc:name="Insert Patient">
+                    <sfdc:objects ref="#[payload]"/>
+                </sfdc:create>    
+                
+                <set-payload value="#[payload[0].Id]" doc:name="Set Payload to the ID of the new Patient object"/>
+            </when>
+            <otherwise>
+                <set-payload value="#[flowVars['existingPid'][0].Id]" doc:name="Set Payload to the ID of the existing Patient object"/>
+            </otherwise>
+        </choice>
+
+        <logger message="SFDC Patient OBJECT ID IS: #[payload]" level="INFO" doc:name="SFDC Lookup Output"/>
+    </sub-flow>
+        
+    <sub-flow name="mule-poc-insert-patientVisit" doc:name="mule-poc-insert-patientVisit">
+
+        <logger message="Log In PatientVisit Flow - #[flowVars['patientId']]" level="INFO" doc:name="Log SF Payload"/>
+
+        <data-mapper:transform config-ref="a01xml2pv1_grf" doc:name="Transform A01 to Patient Visit">
+            <data-mapper:input-arguments>
+                 <data-mapper:input-argument key="PatientIdentifier">#[flowVars['patientId']]</data-mapper:input-argument> 
+<!--                 <data-mapper:input-argument key="Master_Patient__c">#[flowVars['patientId']]</data-mapper:input-argument>
+ -->            
+            </data-mapper:input-arguments>
+        </data-mapper:transform>
+
+        <sfdc:create config-ref="UC_SF_Connection" type="Patient_Visit__c" doc:name="Insert Patient Visit">
+            <sfdc:objects ref="#[payload]"/>
+        </sfdc:create>
+
+        <logger message="CREATED PATIENT VISIT: #[payload]" level="INFO" doc:name="Logger"/>
+
+        <set-payload value="#[payload[0].id]" doc:name="Set Payload"/>
+    </sub-flow>
+    
+    <sub-flow name="rollBackPatient" doc:name="rollBackPatient">
+        <logger message="In Rollback Process - SFDC PATIENT ID IS: #[flowVars['patientId']]" level="INFO" doc:name="Logger"/>
+        
+        <expression-transformer expression="#[[flowVars['patientId']]]"/>
+        
+        <logger message="Payload After Expression = #[payload]" level="INFO" doc:name="Logger"/>
+        
+        <sfdc:delete config-ref="UC_SF_Connection" doc:name="Delete Patient">
+            <sfdc:ids ref="#[payload]"/>
+        </sfdc:delete>
+        <logger message="After deletion = #[payload]" level="INFO" doc:name="Logger"/>
+        <set-payload value="OK"/>
+    </sub-flow>
+
+</mule>
